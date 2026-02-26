@@ -8,7 +8,7 @@ import uuid
 class Discovery:
     def __init__(self, settings, pc_name=None):
         self.settings = settings
-        self.pc_name = pc_name if pc_name is not None else socket.gethostname()
+        self.pc_name = pc_name if pc_name else socket.gethostname()
         self.device_id = str(uuid.uuid4())
 
         self.message = {
@@ -18,14 +18,20 @@ class Discovery:
             "port": self.settings.get_transfer_port()
         }
         self.data = json.dumps(self.message).encode("utf-8")
+
         self.peers = {}
+        self.peers_lock = threading.Lock()
+
         self.running = False
 
     def broadcast_loop(self, interval=2.0):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while self.running:
-            sock.sendto(self.data, ("255.255.255.255", self.settings.get_discovery_port()))
+            try:
+                sock.sendto(self.data, ("255.255.255.255", self.settings.get_discovery_port()))
+            except Exception:
+                pass
             time.sleep(interval)
         sock.close()
 
@@ -37,18 +43,25 @@ class Discovery:
             try:
                 data, addr = sock.recvfrom(4096)
                 msg = json.loads(data)
-                if msg["device_id"] == self.device_id:
+
+                if msg.get("device_id") == self.device_id:
                     continue
-                self.peers[msg["device_id"]] = {
-                    "name": msg.get("name"),
-                    "ip": addr[0],
-                    "port": msg.get("port"),
-                    "last_seen": time.time()
-                }
+
+                with self.peers_lock:
+                    self.peers[msg["device_id"]] = {
+                        "name": msg.get("name", ""),
+                        "ip": addr[0],
+                        "port": msg.get("port", 0),
+                        "last_seen": time.time()
+                    }
+
             except socket.timeout:
+                pass
+            except Exception:
                 pass
         sock.close()
 
+    # Start/stop service
     def start(self):
         self.running = True
         threading.Thread(target=self.broadcast_loop, daemon=True).start()
@@ -56,3 +69,10 @@ class Discovery:
 
     def stop(self):
         self.running = False
+
+    def get_peers(self):
+        """Return a copy of current peers list (safe for UI)."""
+        with self.peers_lock:
+            now = time.time()
+            self.peers = {k: v for k, v in self.peers.items() if now - v["last_seen"] <= 8}
+            return list(self.peers.values())
